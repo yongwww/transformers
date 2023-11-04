@@ -343,13 +343,22 @@ def simplify_stride_slice(f):
     def is_nop(v, begin, end, strides):
         shape = v.struct_info.shape
         for i in range(len(shape)):
-            if begin[i] != 0 or end[i] != shape[i] or strides[i] != 1:
+            if (
+                begin is None
+                or end is None
+                or strides is None
+                or begin[i] != 0
+                or end[i] != shape[i]
+                or strides[i] != 1
+            ):
                 return False
         return True
 
     def callback(orig, matchings):
         inp = matchings[inp_pat]
-        if is_nop(inp, orig.attrs.begin, orig.attrs.end, orig.attrs.strides):
+        if hasattr(orig, "attrs") and is_nop(
+            inp, orig.attrs.begin, orig.attrs.end, orig.attrs.strides
+        ):
             return inp
         return orig
 
@@ -455,18 +464,10 @@ def run_opt_passes(mod, params=None, fp16_input_names=None, combine_matmul=False
     passes = [
         relax.transform.EliminateCommonSubexpr(),
         relax.transform.CanonicalizeBindings(),
-        # relax.transform.ConvertLayout({"relax.nn.conv2d": ["NHWC", "OHWI"]}),
-        # get_rewrite_pass(combine_matmul), # error
+        relax.transform.ConvertLayout({"relax.nn.conv2d": ["NHWC", "OHWI"]}),
+        get_rewrite_pass(combine_matmul),  # error
         relax.transform.DeadCodeElimination(["main"]),
-        #  File "/home/ubuntu/tvm/python/tvm/runtime/object.py", line 75, in __getattr__
-        # raise AttributeError(f"{type(self)} has no attribute {name}") from None
-        # AttributeError: <class 'tvm.relax.expr.DataflowVar'> has no attribute attrs
     ]
-    """
-         File "/home/ubuntu/tvm/src/relax/ir/transform.cc", line 285
-        InternalError: Check failed: (global_scope_vars.empty() && symbolic_vars.empty()) is false:
-          Error: DataflowBlock Pass should not delete any GlobalScope/Symbolic Var.
-    """
 
     if params:
         passes += [
@@ -478,7 +479,7 @@ def run_opt_passes(mod, params=None, fp16_input_names=None, combine_matmul=False
         passes += [
             relax.transform.FoldConstant(),
             # relax.transform.ToMixedPrecision(
-            #    out_dtype="float16", fp16_input_names=fp16_input_names
+            #     out_dtype="float16", fp16_input_names=fp16_input_names
             # ),
         ]
         """
@@ -492,6 +493,7 @@ def run_opt_passes(mod, params=None, fp16_input_names=None, combine_matmul=False
 def offload_to_cutlass(mod, target):
     # Currently, sm86 is not supported.
     sm = int(target.arch.split("_")[1])
+    print("offload_to_cutlass sm: ", sm)
     if sm > 80:
         sm = 80
     mod = partition_for_cutlass(mod)

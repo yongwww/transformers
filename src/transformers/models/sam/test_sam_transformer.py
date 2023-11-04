@@ -86,6 +86,44 @@ def test_transformers_sam():
     print("Hugging Face Transformers SAM inference performance: {} ms".format(duration))
 
 
+def _run_opt_passes(mod, params=None, fp16_input_names=None, combine_matmul=False):
+    passes = [
+        relax.transform.EliminateCommonSubexpr(),
+        relax.transform.CanonicalizeBindings(),
+        relax.transform.ConvertLayout({"relax.nn.conv2d": ["NHWC", "OHWI"]}),
+        # get_rewrite_pass(combine_matmul),  # error
+        relax.transform.DeadCodeElimination(["main"]),
+        #  File "/home/ubuntu/tvm/python/tvm/runtime/object.py", line 75, in __getattr__
+        # raise AttributeError(f"{type(self)} has no attribute {name}") from None
+        # AttributeError: <class 'tvm.relax.expr.DataflowVar'> has no attribute attrs
+    ]
+    """
+         File "/home/ubuntu/tvm/src/relax/ir/transform.cc", line 285
+        InternalError: Check failed: (global_scope_vars.empty() && symbolic_vars.empty()) is false:
+          Error: DataflowBlock Pass should not delete any GlobalScope/Symbolic Var.
+    """
+
+    if params:
+        passes += [
+            relax.transform.BindParams("main", params),
+            relax.transform.FoldConstant(),
+            relax.transform.ToMixedPrecision(out_dtype="float16"),
+        ]
+    else:
+        passes += [
+            relax.transform.FoldConstant(),
+            # relax.transform.ToMixedPrecision(
+            #    out_dtype="float16", fp16_input_names=fp16_input_names
+            # ),
+        ]
+        """
+              File "/home/ubuntu/tvm/src/relax/transform/infer_amp_utils.cc", line 28
+              InternalError: Check failed: (tensor) is false: Expected TensorStructInfo, but got R.Objec
+        """,
+
+    return tvm.transform.Sequential(passes)(mod)
+
+
 def test_tvm_sam():
     batch_size, total_seq_len, dtype = 1, 32, "float32"
 
@@ -120,7 +158,9 @@ def test_tvm_sam():
 
     # apply passes
     mod = run_opt_passes(mod, combine_matmul=True)
-    # mod = offload_to_cutlass(mod, target)
+    # print(mod.script(show_meta=True))
+
+    mod = offload_to_cutlass(mod, target)
 
     # Apply cutlass optimization.
     # mod = partition_for_cutlass(mod)
@@ -130,9 +170,12 @@ def test_tvm_sam():
 
     mod = run_lower_passes(mod, target, do_tuning=False)
 
+    # mod = relax.transform.LambdaLift()(mod)
+
     # with tvm.target.Target("cuda"):
     #     mod = tvm.tir.transform.DefaultGPUSchedule()(mod)
 
+    # print(mod.script(show_meta=True))
     exe = relax.build(mod, target=target)
     vm = relax.VirtualMachine(exe, dev)
 
